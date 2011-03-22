@@ -313,6 +313,8 @@ int main(int argc, char **argv) {
         {"write-debug-reg", required_argument, 0, 137},
         {"do-something", no_argument, 0, 138},
         {"time", no_argument, 0, 139},
+	{"oib", no_argument, 0, 141},
+	{"jump", no_argument, 0, 142},
         {0, 0, 0, 0}
     };
     int idx;
@@ -400,6 +402,12 @@ int main(int argc, char **argv) {
             break;
         case 129:
             syscall(8, 4);
+            break;
+        case 141:
+            printf("0x%08x\n", syscall(8, 30));
+            break;
+	case 142:
+            syscall(8, 31, parse_hex(optarg));
             break;
         case 130:
             assert(!syscall(8, 15));
@@ -498,6 +506,8 @@ usage:
            "    -o addr:               get object info\n"
            "    --do-something:        so transient I won't make it a real option\n"
            "    --time:                mach_absolute_time\n"
+           "    --oib:                 change reboot to boot oib\n"
+           "    --jump:                jump to some address\n"
            , argv[0]);
     return 1;
 }
