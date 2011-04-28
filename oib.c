@@ -1,8 +1,8 @@
 #include "kinc.h"
 #include "iphone_4_openiboot.bin.h"
 // black.c
-void *hook(void *addr, void *replacement, bool force);
-void unhook(void *stub);
+void *hook(void *addr, void *replacement, bool force, void *tag);
+void *unhook(void *stub);
 // creep.c
 int creep_go(void *start, int size);
 void creep_get_records(user_addr_t buf, uint32_t bufsize);
@@ -18,19 +18,27 @@ int protoss_write_debug_reg(uint32_t reg, uint32_t val);
 // failsafe.S
 int run_failsafe(void *result, void *func, uint32_t arg1, uint32_t arg2);
 
+static void *hook_tag;
+
+static int tracer_ticks;
+static lck_grp_t *lck_grp;
+static lck_mtx_t *tracer_lck;
+
+struct apply_args {
+    void **sp;
+    void *r0, *r1, *r2, *r3;
+    void *r7; // not actually part of the __builtin_apply_args() struct
+};
+
 //void *PEHaltRestart(void* something);
 extern int (*PE_halt_restart)(unsigned int type);
 
-struct mysyscall_args {
-    uint32_t mode;
-    uint32_t b;
-    uint32_t c;
-    uint32_t d;
-    uint32_t e;
-    uint32_t f;
+struct frame {
+    struct frame *r7;
+    void *lr;
 };
 
-static int boot_oib(unsigned int type) {
+int oib_reboot(unsigned int type) {
 uint32_t* addr1 = (uint32_t*) 0xBF10202C;
 uint32_t* addr2 = (uint32_t*) 0xBF102024;
 uint32_t* addr3 = (uint32_t*) 0xBF102020;
@@ -42,107 +50,127 @@ uint32_t* addr3 = (uint32_t*) 0xBF102020;
 return 0;
 }
 
+int boot_oib(unsigned int type) {
+asm volatile(
+	"mrs r0, cpsr\n\t"
+	"orr r0, r0, #0x80\n\t"
+	"msr cpsr_c, r0\n\t"
+	"mrs r0, cpsr\n\t"
+	"orr r0, r0, #0x40\n\t"
+	"msr cpsr_c, R0" ::: "r0", "cc", "memory"
+);
+	((void (*)()) ((uint32_t)&iphone_4_openiboot_bin))();
+	return 0;
+}
+
+#define SET_REG(x, y) (*((volatile uint32_t*)(x)) = (y))
+#define VICINTENCLEAR 0x14
+#define VIC0 0xBF200000
+#define VIC1 0xBF210000
+#define VIC2 0xBF220000
+#define VIC3 0xBF230000
+
 static uint32_t oib_call_change() {
 //	boot_oib();
 //	hook(PEHaltRestart, boot_oib, 0);
 //	hook(PEHaltRestart, ((void (*)()) (uint32_t)&iphone_4_openiboot), 0);
 //	PE_halt_restart = ((int (*)(unsigned int type)) iphone_4_openiboot);
-	PE_halt_restart = boot_oib;
-	return (uint32_t)&iphone_4_openiboot;
+//	PE_halt_restart = boot_oib;
+//	uint32_t* buffer = IOMalloc(iphone_4_openiboot_size);
+//	memcpy(buffer, iphone_4_openiboot, iphone_4_openiboot_size);
+//	PE_halt_restart = ((int (*)(unsigned int type)) ((uint32_t)buffer+1));
+
+/*asm volatile(
+	"mrs r0, cpsr\n\t"
+	"orr r0, r0, #0x80\n\t"
+	"msr cpsr_c, r0\n\t"
+	"mrs r0, cpsr\n\t"
+	"orr r0, r0, #0x40\n\t"
+	"msr cpsr_c, R0" ::: "r0", "cc", "memory"
+);
+*/
+	void *matching = IOService_serviceMatching("IOWatchDogTimer", NULL);
+	void *iterator = IOService_getMatchingServices(matching);
+	if(!iterator) {
+		IOLog("null iterator\n");
+		return -1;
+	}
+	void *object;
+	void *regentry = NULL;
+	while(object = OSIterator_getNextObject(iterator)) {
+	    if(!regentry) regentry = object;
+	    IOLog("- %p\n", object);
+            ((void (*)(void* object)) (((uint32_t*)object)[0x178/4]))(object);
+            return 0;
+	}
+	IOLog("\n");
+	OSObject_release(iterator);
+	OSObject_release(matching);
+
+/*
+
+IOWatchDogTimer* wdt = (IOWatchDogTimer*)service;
+wdt->disable();
+
+SET_REG(VIC0 + VICINTENCLEAR, 0xFFFFFFFF); // disable all interrupts
+SET_REG(VIC1 + VICINTENCLEAR, 0xFFFFFFFF);
+SET_REG(VIC2 + VICINTENCLEAR, 0xFFFFFFFF);
+SET_REG(VIC3 + VICINTENCLEAR, 0xFFFFFFFF);
+
+while(1);
+
+//	((void (*)()) ((uint32_t)&iphone_4_openiboot_bin)+1)();
+//	PE_halt_restart = ((int (*)(unsigned int type)) &boot_oib);
+//	PE_halt_restart = ((int (*)(unsigned int type)) (((uint32_t)&oib_reboot)+1));
+//	return (uint32_t)&iphone_4_openiboot_bin;
+*/
+	return 0;
 }
 
-#define VOID_STAR_A1_THROUGH_12 void *a1, void *a2, void *a3, void *a4, void *a5, void *a6, void *a7, void *a8, void *a9, void *a10, void *a11, void *a12
-#define A1_THROUGH_7 a1, a2, a3, a4, a5, a6, a7
-#define A1_THROUGH_12 a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12
-
-static void *(*vt_old)(VOID_STAR_A1_THROUGH_12);
-static void *vt_hook(VOID_STAR_A1_THROUGH_12) {
-    void *result = vt_old(A1_THROUGH_12);
-    IOLog("vt_hook: from:%p <- %p <- %p <- %p <- %p <- %p r0=%p r1=%p r2=%p r3=%p a5=%p a6=%p a7=%p vt=%p result=%p\n",
-        __builtin_return_address(0),
-        __builtin_return_address(1),
-        __builtin_return_address(2),
-        __builtin_return_address(3),
-        __builtin_return_address(4),
-        __builtin_return_address(5),
-        A1_THROUGH_7, *((void **) a1), result);
-    return result;
-}
-
-static void *(*ttbr_old)(VOID_STAR_A1_THROUGH_12);
-static void *ttbr_hook(VOID_STAR_A1_THROUGH_12) {
-    uint32_t ttbr0, ttbr1;
-    asm("mrc p15, 0, %0, c2, c0, 0" :"=r"(ttbr0));
-    asm("mrc p15, 0, %0, c2, c0, 1" :"=r"(ttbr1));
-    IOLog("ttbr_hook: from:%p <- %p <- %p r0=%p r1=%p r2=%p r3=%p a5=%p a6=%p a7=%p ttbr0=%x ttbr1=%x\n", __builtin_return_address(0), __builtin_return_address(1), __builtin_return_address(2), A1_THROUGH_7, ttbr0, ttbr1);
-    return ttbr_old(A1_THROUGH_12);
-}
-
-static void *(*logger_old)(VOID_STAR_A1_THROUGH_12);
-static void *logger_hook(VOID_STAR_A1_THROUGH_12) {
-    void *result = logger_old(A1_THROUGH_12);
-    IOLog("logger_hook: from:%p <- %p <- %p <- %p <- %p <- %p r0=%p r1=%p r2=%p r3=%p a5=%p a6=%p a7=%p result=%p pid=%d sp=%p\n",
-        __builtin_return_address(0),
-        __builtin_return_address(1),
-        __builtin_return_address(2),
-        __builtin_return_address(3),
-        __builtin_return_address(4),
-        __builtin_return_address(5),
-        A1_THROUGH_7,
-        result,
-        proc_pid(current_proc()),
-        &result);
-    return result;
-}
-
-static void *(*tracer_old)(VOID_STAR_A1_THROUGH_12);
-static bool tracer_did_trace;
-static void *tracer_hook(VOID_STAR_A1_THROUGH_12) {
-    bool should_trace = !tracer_did_trace;
-    tracer_did_trace = true;
-    if(should_trace) protoss_go();
-    void *result = tracer_old(A1_THROUGH_12);
-    if(should_trace) protoss_stop();
-    IOLog("tracer_hook: from:%p <- %p <- %p r0=%p r1=%p r2=%p r3=%p a5=%p a6=%p a7=%p result=%p\n", __builtin_return_address(0), __builtin_return_address(1), __builtin_return_address(2), A1_THROUGH_7, result);
-    return result;
-}
-
-static int (*vm_fault_enter_old)(void *m, void *pmap, uint32_t vaddr, vm_prot_t prot, boolean_t wired, boolean_t change_wiring, boolean_t no_cache, int *type_of_fault);
-static int vm_fault_enter_hook(void *m, void *pmap, uint32_t vaddr, vm_prot_t prot, boolean_t wired, boolean_t change_wiring, boolean_t no_cache, int *type_of_fault) {
-    if((vaddr & 0xf0000000) == 0x10000000) {
-        if(!(vaddr & 0xfffff)) { // xxx
-            IOLog("vm_map_enter: vaddr=%08x pmap=%p prot=%x wired=%d change_wiring=%d no_cache=%d\n", vaddr, pmap, prot, wired, change_wiring, no_cache);
+static void get_return_addresses(struct frame *frame, void **returns, int n) {
+    while(n--) {
+        if(!frame || frame == (void *) 0xffffffff) {
+            *returns++ = 0xeeeeeeee;
+        } else {
+            *returns++ = frame->lr;
+            frame = frame->r7;
         }
     }
-    return vm_fault_enter_old(m, pmap, vaddr, prot, wired, change_wiring, no_cache, type_of_fault);
 }
 
-void *(*weird_old)(VOID_STAR_A1_THROUGH_12);
-void *weird_hook(VOID_STAR_A1_THROUGH_12) {
-    void *result = weird_old(A1_THROUGH_12);
-    uint32_t *p = (uint32_t *) &p;
-    for(int i = 0; i < 32; i++) {
-        IOLog("%03x: %08x %08x %08x %08x\n", 16*i, p[0], p[1], p[2], p[3]);
-        p += 4;
+static void *hook_generic(bool should_trace, void *old, struct apply_args *args) {
+    if(should_trace) {
+        protoss_go();
     }
+    void *result = __builtin_apply(old, args, 60);
+    if(should_trace) {
+        protoss_stop();
+    }
+    void *returns[6];
+    get_return_addresses(args->r7, returns, 6);
+    IOLog("hook%s: from:%p <- %p <- %p <- %p <- %p <- %p r0=%p r1=%p r2=%p r3=%p a5=%p a6=%p a7=%p result=%p pid=%d\n",
+        should_trace ? " (traced)" : "",
+        returns[0], returns[1], returns[2], returns[3], returns[4], returns[5],
+        args->r0, args->r1, args->r2, args->r3, args->sp[0], args->sp[1], args->sp[2],
+        result,
+        proc_pid(current_proc()));
     return result;
 }
 
-static int do_something_usb_related() {
-    char *base = (void *) 0xd3edc000;
-    for(int i = 0; i < 8; i++) {
-        volatile uint32_t *control = (void *) (base + i*0x20 + 0x900);
-        uint32_t c = *control;
-        IOLog("%x\n", c);
-    }
-    *((volatile uint32_t *) (base + 3*0x20 + 0x914)) = 0x40001000;
-    *((volatile uint32_t *) (base + 3*0x20 + 0x910)) = (1 << 19) | 63;
-    *((volatile uint32_t *) (base + 3*0x20 + 0x900)) |= 0x84000000;
-    IOLog("%08x\n", *((volatile uint32_t *) (base + 3*0x20 + 0x900)));
-    IOSleep(100);
-    IOLog("%08x\n", *((volatile uint32_t *) (base + 3*0x20 + 0x900)));
+static void *logger_hook(void *old, struct apply_args *args) {
+    __builtin_return(hook_generic(false, old, args));
+}
 
-    return 0;
+static void *tracer_hook(void *old, struct apply_args *args) {
+    lck_mtx_lock(tracer_lck);
+    bool should_trace = !tracer_ticks--;
+    void *result = hook_generic(should_trace, old, args);
+    lck_mtx_unlock(tracer_lck);
+    __builtin_return(result);
+}
+
+static void *weird_hook(void *old, struct apply_args *args) {
+    __builtin_return(__builtin_apply(old, args, 60));
 }
 
 static int ioreg(uint32_t type, user_addr_t path) {
@@ -232,31 +260,24 @@ static int poke_mem(void *kaddr, uint32_t uaddr, uint32_t size, bool write, bool
 
 
 int do_something() {
-    void *matching = IOService_serviceMatching("AppleS5L8930XIO", NULL); 
-    void *service = IOService_waitForMatchingService(matching, 1000000000ULL);
-    if(!service) return -1;
-    OSObject_release(matching);
-    void *platform_device = ((void **) service)[0x54/4];
-    if(!platform_device) return -2;
-    kern_return_t r = IOService_unregisterInterrupt(platform_device, 0);
-    if(r) return r;
-
-    for(unsigned int i = 0x10000; i < 0xFFF0FFFF; i += 0x10000) { // fuck endians
-        void *descriptor = IOMemoryDescriptor_withPhysicalAddress(i, 65536, kIODirectionIn);
-        void *map = IOMemoryDescriptor_map(descriptor, 0);
-        char *q = ((uint32_t *) map)[0x14/4];
-        
-        if (*((unsigned int *) q) == 0xea00000e && *((unsigned int *) (q + 4)) == 0xe59ff018) {
-            return i;
-        }
-    }
-   
-    return -4;
+    uint32_t time, microtime;
+    clock_get_system_microtime(&time, &microtime);
+    IOLog("sec=%u usec=%u\n", time, microtime);
+    return 0;
 }
 
 // from the loader
 extern struct sysent sysent[];
 struct sysent saved_sysent;
+
+struct mysyscall_args {
+    uint32_t mode;
+    uint32_t b;
+    uint32_t c;
+    uint32_t d;
+    uint32_t e;
+    uint32_t f;
+};
 
 int mysyscall(void *p, struct mysyscall_args *uap, int32_t *retval);
 __attribute__((constructor))
@@ -264,23 +285,24 @@ void init() {
     IOLog("init %p\n", mysyscall);
     saved_sysent = sysent[8];
     sysent[8] = (struct sysent){ 1, 0, 0, (void *) mysyscall, NULL, NULL, _SYSCALL_RET_INT_T, sizeof(struct mysyscall_args) };
+    lck_grp = lck_grp_alloc_init("kcode", NULL);
+    tracer_lck = lck_mtx_alloc_init(lck_grp, NULL);
 }
 
 void fini_() {
     IOLog("unhook\n");
     creep_stop();
     protoss_unload();
-    unhook(logger_old); logger_old = NULL;
-    unhook(ttbr_old); ttbr_old = NULL;
-    unhook(tracer_old); tracer_old = NULL; tracer_did_trace = false;
-    unhook(vt_old); vt_old = NULL;
-    unhook(vm_fault_enter_old); vm_fault_enter_old = NULL;
-    unhook(weird_old); weird_old = NULL;
+    while(hook_tag) {
+        hook_tag = unhook(hook_tag);
+    }
 }
 
 __attribute__((destructor))
 void fini() {
     fini_();
+    lck_mtx_free(tracer_lck, lck_grp);
+    lck_grp_free(lck_grp);
     sysent[8] = saved_sysent;
 }
 
@@ -342,28 +364,11 @@ int mysyscall(void *p, struct mysyscall_args *uap, int32_t *retval)
         fini_();
         break;
     case 7: // hook a function, log args
-        *retval = 0;
-        if(!(logger_old = hook((void *) uap->b, logger_hook, uap->c))) {
-            *retval = -1;
-        }
-        break;
-    case 29:
-        *retval = 0;
-        if(!(ttbr_old = hook((void *) uap->b, ttbr_hook, uap->c))) {
-            *retval = -1;
-        }
-        break;
-    case 8: // hook vm_fault_enter
-        *retval = 0;
-        if(!(vm_fault_enter_old = hook((void *) uap->b, vm_fault_enter_hook, false))) {
-            *retval = -1;
-        }
+        *retval = (hook_tag = hook((void *) uap->b, logger_hook, uap->c, hook_tag)) ? 0 : -1;
+        IOLog("hook_tag = %p\n", hook_tag);
         break;
     case 9: // hook weird
-        *retval = 0;
-        if(!(weird_old = hook((void *) uap->b, weird_hook, false))) {
-            *retval = -1;
-        }
+        *retval = (hook_tag = hook((void *) uap->b, weird_hook, uap->c, hook_tag)) ? 0 : -1;
         break;
     case 10:
         *retval = creep_go((void *) uap->b, (int) uap->c);
@@ -371,9 +376,6 @@ int mysyscall(void *p, struct mysyscall_args *uap, int32_t *retval)
     case 11:
         creep_get_records((user_addr_t) uap->b, uap->c);
         *retval = 0;
-        break;
-    case 12:
-        *retval = do_something_usb_related();
         break;
     case 13:
         *retval = ioreg(uap->b, (user_addr_t) uap->c);
@@ -387,18 +389,12 @@ int mysyscall(void *p, struct mysyscall_args *uap, int32_t *retval)
             protoss_stop();
         }
         break;
-    case 19: // vt
-        *retval = 0;
-        if(!(vt_old = hook((void *) uap->b, vt_hook, false))) {
-            *retval = -1;
-        }
+    case 17:
+        Debugger("Debugger() from kcode");
         break;
     case 20: // tracer
-        *retval = 0;
-        tracer_did_trace = false;
-        if(!(tracer_old = hook((void *) uap->b, tracer_hook, uap->c))) {
-            *retval = -1;
-        }
+        tracer_ticks = uap->d;
+        *retval = (hook_tag = hook((void *) uap->b, tracer_hook, uap->c, hook_tag)) ? 0 : -1;
         break;
     case 21:
         *retval = lookup_metaclass(uap->b);
