@@ -72,6 +72,7 @@ LC void invalidate_icache(vm_offset_t addr, unsigned cnt, bool phys);
 LC void flush_dcache(vm_offset_t addr, unsigned cnt, bool phys);
 
 LC void *IOMalloc(size_t size);
+LC void *IOMallocContiguous(size_t size, size_t alignment, void* physicalAddress);
 LC void IOFree(void *p);
 
 LC int vm_allocate(vm_map_t map, vm_offset_t *addr, vm_size_t size, int flags);

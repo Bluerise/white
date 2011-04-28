@@ -18,6 +18,8 @@ int protoss_write_debug_reg(uint32_t reg, uint32_t val);
 // failsafe.S
 int run_failsafe(void *result, void *func, uint32_t arg1, uint32_t arg2);
 
+static int poke_mem(void *kaddr, uint32_t uaddr, uint32_t size, bool write, bool phys);
+
 static void *hook_tag;
 
 static int tracer_ticks;
@@ -39,15 +41,15 @@ struct frame {
 };
 
 int oib_reboot(unsigned int type) {
-uint32_t* addr1 = (uint32_t*) 0xBF10202C;
-uint32_t* addr2 = (uint32_t*) 0xBF102024;
-uint32_t* addr3 = (uint32_t*) 0xBF102020;
-*addr1 = 0;
-*addr2 = 1;
-*addr3 = 0x80000000;
-*addr1 = 4;
-*addr3 = 0;
-return 0;
+	uint32_t* addr1 = (uint32_t*) 0xBF10202C;
+	uint32_t* addr2 = (uint32_t*) 0xBF102024;
+	uint32_t* addr3 = (uint32_t*) 0xBF102020;
+	poke_mem((void*)addr1, 0, 4, 1, 1);
+	poke_mem((void*)addr2, 1, 4, 1, 1);
+	poke_mem((void*)addr3, 0x80000000, 4, 1, 1);
+	poke_mem((void*)addr1, 4, 4, 1, 1);
+	poke_mem((void*)addr3, 0, 4, 1, 1);
+	return 0;
 }
 
 int boot_oib(unsigned int type) {
@@ -63,32 +65,13 @@ asm volatile(
 	return 0;
 }
 
-#define SET_REG(x, y) (*((volatile uint32_t*)(x)) = (y))
-#define VICINTENCLEAR 0x14
-#define VIC0 0xBF200000
-#define VIC1 0xBF210000
-#define VIC2 0xBF220000
-#define VIC3 0xBF230000
-
 static uint32_t oib_call_change() {
-//	boot_oib();
-//	hook(PEHaltRestart, boot_oib, 0);
-//	hook(PEHaltRestart, ((void (*)()) (uint32_t)&iphone_4_openiboot), 0);
-//	PE_halt_restart = ((int (*)(unsigned int type)) iphone_4_openiboot);
-//	PE_halt_restart = boot_oib;
-//	uint32_t* buffer = IOMalloc(iphone_4_openiboot_size);
-//	memcpy(buffer, iphone_4_openiboot, iphone_4_openiboot_size);
-//	PE_halt_restart = ((int (*)(unsigned int type)) ((uint32_t)buffer+1));
+	// Copy us first
+        size_t oibSize = sizeof(iphone_4_openiboot_bin);
+	uint32_t *oibMem = IOMallocContiguous(oibSize, 0, NULL);
+	memcpy(oibMem, iphone_4_openiboot_bin, oibSize);
 
-/*asm volatile(
-	"mrs r0, cpsr\n\t"
-	"orr r0, r0, #0x80\n\t"
-	"msr cpsr_c, r0\n\t"
-	"mrs r0, cpsr\n\t"
-	"orr r0, r0, #0x40\n\t"
-	"msr cpsr_c, R0" ::: "r0", "cc", "memory"
-);
-*/
+	// Disable the WDT
 	void *matching = IOService_serviceMatching("IOWatchDogTimer", NULL);
 	void *iterator = IOService_getMatchingServices(matching);
 	if(!iterator) {
@@ -100,30 +83,32 @@ static uint32_t oib_call_change() {
 	while(object = OSIterator_getNextObject(iterator)) {
 	    if(!regentry) regentry = object;
 	    IOLog("- %p\n", object);
-            ((void (*)(void* object)) (((uint32_t*)object)[0x178/4]))(object);
-            return 0;
+            ((void (*)(void* object)) (((uint32_t*)(*((uint32_t*)(object))))[0x178/4]))(object);
 	}
 	IOLog("\n");
 	OSObject_release(iterator);
 	OSObject_release(matching);
 
-/*
+	// Disable the IRQs
+	asm volatile(
+		"mrs r0, cpsr\n\t"
+		"orr r0, r0, #0x80\n\t"
+		"msr cpsr_c, r0\n\t"
+		"mrs r0, cpsr\n\t"
+		"orr r0, r0, #0x40\n\t"
+		"msr cpsr_c, R0" ::: "r0", "cc", "memory"
+	);
 
-IOWatchDogTimer* wdt = (IOWatchDogTimer*)service;
-wdt->disable();
+	((void (*)()) (((uint32_t)(*oibMem))))();
 
-SET_REG(VIC0 + VICINTENCLEAR, 0xFFFFFFFF); // disable all interrupts
-SET_REG(VIC1 + VICINTENCLEAR, 0xFFFFFFFF);
-SET_REG(VIC2 + VICINTENCLEAR, 0xFFFFFFFF);
-SET_REG(VIC3 + VICINTENCLEAR, 0xFFFFFFFF);
+//	((void (*)()) ((uint32_t)iphone_4_openiboot_bin))();
+//	((void (*)()) (((uint32_t)iphone_4_openiboot_bin)+1))();
+	while(1);
 
-while(1);
-
-//	((void (*)()) ((uint32_t)&iphone_4_openiboot_bin)+1)();
 //	PE_halt_restart = ((int (*)(unsigned int type)) &boot_oib);
 //	PE_halt_restart = ((int (*)(unsigned int type)) (((uint32_t)&oib_reboot)+1));
 //	return (uint32_t)&iphone_4_openiboot_bin;
-*/
+
 	return 0;
 }
 
