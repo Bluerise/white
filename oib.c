@@ -115,6 +115,21 @@ static uint32_t oib_call_change() {
 		"msr cpsr_c, r0" ::: "r0", "cc", "memory"
 	);
 
+	asm volatile(
+		"mov r0, #0\n\t"
+		"mcr p15, 0, r0, c7, c14, 1\n\t"
+		"mov r0, #0\n\t"
+		"mcr p15, 0, r0, c7, c5\n\t"
+		"nop\n\t"
+		"nop\n\t"
+		"nop\n\t"
+		"nop\n\t"
+		"mrc p15, 0, r0, c1, c0, 0\n\t"
+		"bic r0, #0x1000\n\t"
+		"bic r0, #0x4\n\t"
+		"mcr p15, 0, r0, c1, c0, 0\n\t"
+	);
+
 	uint32_t ttbr0;
         asm("mrc p15, 0, %0, c2, c0, 0" :"=r"(ttbr0));
 
@@ -126,6 +141,11 @@ static uint32_t oib_call_change() {
 		| MMU_SECTION;				// this is a section
 
 	poke_mem(&((uint32_t*)ttbr0)[section >> 20], (uint32_t)&sectionEntry, 4, true, true);
+
+	asm volatile(
+		"mov r0, #0\n\t"
+		"mcr p15, 0, r0, c8, c7\n\t"
+	);
 
 //	poke_mem((void*)0x5F700000, (uint32_t)iphone_4_openiboot_bin, oibSize, 1, 1);
 
