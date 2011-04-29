@@ -40,15 +40,32 @@ struct frame {
     void *lr;
 };
 
+#define MMU_SECTION_SIZE 0x100000
+#define MMU_SECTION_MASK 0xFFF00000
+
+#define MMU_SECTION 0x2
+#define MMU_AP_NOACCESS 0x0
+#define MMU_AP_PRIVILEGEDONLY 0xA00
+#define MMU_AP_BOTH 0xB00
+#define MMU_AP_BOTHWRITE 0xC00
+#define MMU_EXECUTENEVER 0x10
+#define MMU_CACHEABLE 0x8
+#define MMU_BUFFERABLE 0x4
+
 int oib_reboot(unsigned int type) {
 	uint32_t* addr1 = (uint32_t*) 0xBF10202C;
 	uint32_t* addr2 = (uint32_t*) 0xBF102024;
 	uint32_t* addr3 = (uint32_t*) 0xBF102020;
-	poke_mem((void*)addr1, 0, 4, 1, 1);
-	poke_mem((void*)addr2, 1, 4, 1, 1);
-	poke_mem((void*)addr3, 0x80000000, 4, 1, 1);
-	poke_mem((void*)addr1, 4, 4, 1, 1);
-	poke_mem((void*)addr3, 0, 4, 1, 1);
+	uint32_t val1 = 0;
+	uint32_t val2 = 1;
+	uint32_t val3 = 0x80000000;
+	uint32_t val4 = 4;
+	
+	poke_mem((void*)addr1, (uint32_t)&val1, 4, 1, 1);
+	poke_mem((void*)addr2, (uint32_t)&val2, 4, 1, 1);
+	poke_mem((void*)addr3, (uint32_t)&val3, 4, 1, 1);
+	poke_mem((void*)addr1, (uint32_t)&val4, 4, 1, 1);
+	poke_mem((void*)addr3, (uint32_t)&val1, 4, 1, 1);
 	return 0;
 }
 
@@ -61,15 +78,14 @@ asm volatile(
 	"orr r0, r0, #0x40\n\t"
 	"msr cpsr_c, R0" ::: "r0", "cc", "memory"
 );
-	((void (*)()) ((uint32_t)&iphone_4_openiboot_bin))();
+//	((void (*)()) ((uint32_t)&iphone_4_openiboot_bin))();
 	return 0;
 }
 
 static uint32_t oib_call_change() {
-	// Copy us first
         size_t oibSize = sizeof(iphone_4_openiboot_bin);
-	uint32_t *oibMem = IOMallocContiguous(oibSize, 0, NULL);
-	memcpy(oibMem, iphone_4_openiboot_bin, oibSize);
+	uint32_t section = 0x200000;
+	uint32_t *oibAddr = (uint32_t*)section;
 
 	// Disable the WDT
 	void *matching = IOService_serviceMatching("IOWatchDogTimer", NULL);
@@ -96,10 +112,27 @@ static uint32_t oib_call_change() {
 		"msr cpsr_c, r0\n\t"
 		"mrs r0, cpsr\n\t"
 		"orr r0, r0, #0x40\n\t"
-		"msr cpsr_c, R0" ::: "r0", "cc", "memory"
+		"msr cpsr_c, r0" ::: "r0", "cc", "memory"
 	);
 
-	((void (*)()) (((uint32_t)(*oibMem))))();
+	uint32_t ttbr0;
+        asm("mrc p15, 0, %0, c2, c0, 0" :"=r"(ttbr0));
+
+	uint32_t sectionEntry =
+		(section & MMU_SECTION_MASK)
+		| MMU_CACHEABLE
+		| MMU_BUFFERABLE
+		| MMU_AP_BOTHWRITE			// set AP to 11 (APX is always 0, so this means R/W for everyone)
+		| MMU_SECTION;				// this is a section
+
+	poke_mem(&((uint32_t*)ttbr0)[section >> 20], (uint32_t)&sectionEntry, 4, true, true);
+
+//	poke_mem((void*)0x5F700000, (uint32_t)iphone_4_openiboot_bin, oibSize, 1, 1);
+
+	memcpy((uint32_t*)section, iphone_4_openiboot_bin, oibSize);
+	while(1);
+
+	((void (*)()) oibAddr)();
 
 //	((void (*)()) ((uint32_t)iphone_4_openiboot_bin))();
 //	((void (*)()) (((uint32_t)iphone_4_openiboot_bin)+1))();
