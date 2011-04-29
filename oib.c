@@ -53,7 +53,9 @@ static uint32_t oib_boot() {
         size_t oibSize = sizeof(iphone_4_openiboot_bin);
 	uint32_t *oibAddr;
 
-	IOMallocContiguous(MMU_SECTION_SIZE, MMU_SECTION_SIZE, &oibAddr);
+	uint32_t oibAddr_virt = (uint32_t)IOMallocContiguous(MMU_SECTION_SIZE, MMU_SECTION_SIZE, &oibAddr);
+	if(!oibAddr_virt)
+		return -1;
 
 	// Disable the WDT
 	void *matching = IOService_serviceMatching("IOWatchDogTimer", NULL);
