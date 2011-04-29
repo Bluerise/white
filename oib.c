@@ -19,6 +19,7 @@ int protoss_write_debug_reg(uint32_t reg, uint32_t val);
 int run_failsafe(void *result, void *func, uint32_t arg1, uint32_t arg2);
 
 static int poke_mem(void *kaddr, uint32_t uaddr, uint32_t size, bool write, bool phys);
+static int poke_memcpy(void *kaddr, uint32_t uaddr, uint32_t size, bool write, bool phys);
 
 static void *hook_tag;
 
@@ -44,50 +45,15 @@ struct frame {
 #define MMU_SECTION_MASK 0xFFF00000
 
 #define MMU_SECTION 0x2
-#define MMU_AP_NOACCESS 0x0
-#define MMU_AP_PRIVILEGEDONLY 0xA00
-#define MMU_AP_BOTH 0xB00
 #define MMU_AP_BOTHWRITE 0xC00
-#define MMU_EXECUTENEVER 0x10
 #define MMU_CACHEABLE 0x8
 #define MMU_BUFFERABLE 0x4
 
-int oib_reboot(unsigned int type) {
-	uint32_t* addr1 = (uint32_t*) 0xBF10202C;
-	uint32_t* addr2 = (uint32_t*) 0xBF102024;
-	uint32_t* addr3 = (uint32_t*) 0xBF102020;
-	uint32_t val1 = 0;
-	uint32_t val2 = 1;
-	uint32_t val3 = 0x80000000;
-	uint32_t val4 = 4;
-	
-	poke_mem((void*)addr1, (uint32_t)&val1, 4, 1, 1);
-	poke_mem((void*)addr2, (uint32_t)&val2, 4, 1, 1);
-	poke_mem((void*)addr3, (uint32_t)&val3, 4, 1, 1);
-	poke_mem((void*)addr1, (uint32_t)&val4, 4, 1, 1);
-	poke_mem((void*)addr3, (uint32_t)&val1, 4, 1, 1);
-	return 0;
-}
-
-int boot_oib(unsigned int type) {
-asm volatile(
-	"mrs r0, cpsr\n\t"
-	"orr r0, r0, #0x80\n\t"
-	"msr cpsr_c, r0\n\t"
-	"mrs r0, cpsr\n\t"
-	"orr r0, r0, #0x40\n\t"
-	"msr cpsr_c, R0" ::: "r0", "cc", "memory"
-);
-//	((void (*)()) ((uint32_t)&iphone_4_openiboot_bin))();
-	return 0;
-}
-
-static uint32_t oib_call_change() {
+static uint32_t oib_boot() {
         size_t oibSize = sizeof(iphone_4_openiboot_bin);
-	uint32_t section = 0x40000000;
-	uint32_t sectionStart = 0x40000000;
-	uint32_t lastSection = 0x41000000;
-	uint32_t *oibAddr = (uint32_t*)section;
+	uint32_t *oibAddr;
+
+	IOMallocContiguous(MMU_SECTION_SIZE, MMU_SECTION_SIZE, &oibAddr);
 
 	// Disable the WDT
 	void *matching = IOService_serviceMatching("IOWatchDogTimer", NULL);
@@ -117,67 +83,44 @@ static uint32_t oib_call_change() {
 		"msr cpsr_c, r0" ::: "r0", "cc", "memory"
 	);
 
+	// Disable the Caches
 	asm volatile(
 		"mrc p15, 0, r0, c1, c0, 0\n\t"
 		"bic r0, #0x1000\n\t"
 		"bic r0, #0x4\n\t"
 		"mcr p15, 0, r0, c1, c0, 0\n\t" ::: "r0", "cc", "memory"
 	);
-/*
-		"mov r0, #0\n\t"
-		"mcr p15, 0, r0, c7, c14\n\t"
-		"mcr p15, 0, r0, c7, c5\n\t"
-		"mcr p15, 0, r0, c7, c10, 4\n\t" ::: "r0", "cc", "memory"
-	);
-		"mcr p15, 0, r0, c7, c10, 4\n\t"
-		"mov r0, #0xd3\n\t"
-		"msr cpsr_c, r0" ::: "r0", "cc", "memory"
-	);
-*/
 
+
+	// Second TTBR is holding addresses starting at 0x40000000
+	// Map the block we got alloced to itself. Awesome!
 	uint32_t ttbr1;
         asm("mrc p15, 0, %0, c2, c0, 1" :"=r"(ttbr1));
+	ttbr1 &= ~0x3f;
 
-	uint32_t sectionEntries[((lastSection-sectionStart)/MMU_SECTION_SIZE)+1];
-	uint32_t currentSection;
-	for (currentSection = sectionStart; currentSection <= lastSection; currentSection += MMU_SECTION_SIZE) {
-		sectionEntries[(currentSection-sectionStart)/MMU_SECTION_SIZE] =
-			(currentSection & MMU_SECTION_MASK)
-			| MMU_CACHEABLE
-			| MMU_BUFFERABLE
-			| MMU_AP_BOTHWRITE			// set AP to 11 (APX is always 0, so this means R/W for everyone)
-			| MMU_SECTION;				// this is a section
-	}
+	uint32_t sectionEntry;
+	sectionEntry =
+		((uint32_t)oibAddr & MMU_SECTION_MASK)
+		| MMU_CACHEABLE
+		| MMU_BUFFERABLE
+		| MMU_AP_BOTHWRITE			// set AP to 11 (APX is always 0, so this means R/W for everyone)
+		| MMU_SECTION;				// this is a section
 
-/*
-	uint32_t miu;
-	poke_mem((uint32_t*)0xBFC00000, (uint32_t)&miu, 4, false, true);
-	miu &= ~3;
-	miu |= 2;
-	poke_mem((uint32_t*)0xBFC00000, (uint32_t)&miu, 4, true, true);
-*/
+	poke_memcpy(((uint32_t*)ttbr1)+((uint32_t)oibAddr >> 20), (uint32_t)&sectionEntry, sizeof(sectionEntry), 1, 1);
 
-	poke_mem(((uint32_t*)ttbr1)+(sectionStart >> 20), (uint32_t)sectionEntries, sizeof(sectionEntries), true, true);
-
+	// Flush the TLB
 	asm volatile(
 		"mov r0, #0\n\t"
 		"mcr p15, 0, r0, c8, c7" ::: "r0", "cc", "memory"
 	);
 
-//	poke_mem((void*)0x5F700000, (uint32_t)iphone_4_openiboot_bin, oibSize, 1, 1);
 
+	// Copy us to the buffer.
 	memcpy(oibAddr, iphone_4_openiboot_bin, oibSize);
 
-	((void (*)()) (((uint32_t)oibAddr)+1))();
+	// Jump. Have a nice trip!
+	((void (*)()) (((uint32_t)oibAddr)))();
 	while(1);
-
-//	((void (*)()) ((uint32_t)iphone_4_openiboot_bin))();
-//	((void (*)()) (((uint32_t)iphone_4_openiboot_bin)+1))();
-	while(1);
-
-//	PE_halt_restart = ((int (*)(unsigned int type)) &boot_oib);
-//	PE_halt_restart = ((int (*)(unsigned int type)) (((uint32_t)&oib_reboot)+1));
-//	return (uint32_t)&iphone_4_openiboot_bin;
 
 	return 0;
 }
@@ -304,6 +247,37 @@ static int poke_mem(void *kaddr, uint32_t uaddr, uint32_t size, bool write, bool
         retval = copyin(uaddr, kaddr, size);
     } else {
         retval = copyout(kaddr, uaddr, size);
+    }
+
+    if(phys) {
+        OSObject_release(map);
+        OSObject_release(descriptor);
+    }
+    return retval;
+}
+
+static int poke_memcpy(void *kaddr, uint32_t uaddr, uint32_t size, bool write, bool phys) {
+    void *descriptor = 0, *map = 0;
+    int retval;
+    if(phys) {
+        descriptor = IOMemoryDescriptor_withPhysicalAddress((uint32_t) kaddr, size, write ? kIODirectionOut : kIODirectionIn);
+        if(!descriptor) {
+            IOLog("couldn't create descriptor\n");
+            return -1;
+        }
+        map = IOMemoryDescriptor_map(descriptor, 0);
+        if(!map) {
+            IOLog("couldn't map descriptor\n");
+            OSObject_release(descriptor);
+            return -1;
+        }
+        kaddr = IOMemoryMap_getAddress(map);
+    }
+
+    if(write) {
+        retval = (uint32_t)memcpy(kaddr, (uint32_t*)uaddr, size);
+    } else {
+        retval = (uint32_t)memcpy((uint32_t*)uaddr, kaddr, size);
     }
 
     if(phys) {
@@ -484,7 +458,7 @@ int mysyscall(void *p, struct mysyscall_args *uap, int32_t *retval)
         *retval = (int32_t) get_proc_map((int) uap->b);
         break;
     case 30:
-	*retval = oib_call_change();
+	*retval = oib_boot();
 	break;
     case 31: // crash
         ((void (*)()) uap->b)();
