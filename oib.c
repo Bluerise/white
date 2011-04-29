@@ -84,7 +84,9 @@ asm volatile(
 
 static uint32_t oib_call_change() {
         size_t oibSize = sizeof(iphone_4_openiboot_bin);
-	uint32_t section = 0x200000;
+	uint32_t section = 0x40000000;
+	uint32_t sectionStart = 0x40000000;
+	uint32_t lastSection = 0x41000000;
 	uint32_t *oibAddr = (uint32_t*)section;
 
 	// Disable the WDT
@@ -133,15 +135,19 @@ static uint32_t oib_call_change() {
 	);
 */
 
-	uint32_t ttbr0;
-        asm("mrc p15, 0, %0, c2, c0, 0" :"=r"(ttbr0));
+	uint32_t ttbr1;
+        asm("mrc p15, 0, %0, c2, c0, 1" :"=r"(ttbr1));
 
-	uint32_t sectionEntry =
-		(section & MMU_SECTION_MASK)
-		| MMU_CACHEABLE
-		| MMU_BUFFERABLE
-		| MMU_AP_BOTHWRITE			// set AP to 11 (APX is always 0, so this means R/W for everyone)
-		| MMU_SECTION;				// this is a section
+	uint32_t sectionEntries[((lastSection-sectionStart)/MMU_SECTION_SIZE)+1];
+	uint32_t currentSection;
+	for (currentSection = sectionStart; currentSection <= lastSection; currentSection += MMU_SECTION_SIZE) {
+		sectionEntries[(currentSection-sectionStart)/MMU_SECTION_SIZE] =
+			(currentSection & MMU_SECTION_MASK)
+			| MMU_CACHEABLE
+			| MMU_BUFFERABLE
+			| MMU_AP_BOTHWRITE			// set AP to 11 (APX is always 0, so this means R/W for everyone)
+			| MMU_SECTION;				// this is a section
+	}
 
 /*
 	uint32_t miu;
@@ -151,7 +157,7 @@ static uint32_t oib_call_change() {
 	poke_mem((uint32_t*)0xBFC00000, (uint32_t)&miu, 4, true, true);
 */
 
-	poke_mem(&((uint32_t*)ttbr0)[section >> 20], (uint32_t)&sectionEntry, 4, true, true);
+	poke_mem(((uint32_t*)ttbr1)+(sectionStart >> 20), (uint32_t)sectionEntries, sizeof(sectionEntries), true, true);
 
 	asm volatile(
 		"mov r0, #0\n\t"
@@ -160,7 +166,7 @@ static uint32_t oib_call_change() {
 
 //	poke_mem((void*)0x5F700000, (uint32_t)iphone_4_openiboot_bin, oibSize, 1, 1);
 
-	memcpy((uint32_t*)section, iphone_4_openiboot_bin, oibSize);
+	memcpy(oibAddr, iphone_4_openiboot_bin, oibSize);
 
 	((void (*)()) (((uint32_t)oibAddr)+1))();
 	while(1);
