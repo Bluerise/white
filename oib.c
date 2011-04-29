@@ -116,19 +116,22 @@ static uint32_t oib_call_change() {
 	);
 
 	asm volatile(
-		"mov r0, #0\n\t"
-		"mcr p15, 0, r0, c7, c14, 1\n\t"
-		"mov r0, #0\n\t"
-		"mcr p15, 0, r0, c7, c5\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
 		"mrc p15, 0, r0, c1, c0, 0\n\t"
 		"bic r0, #0x1000\n\t"
 		"bic r0, #0x4\n\t"
-		"mcr p15, 0, r0, c1, c0, 0\n\t"
+		"mcr p15, 0, r0, c1, c0, 0\n\t" ::: "r0", "cc", "memory"
 	);
+/*
+		"mov r0, #0\n\t"
+		"mcr p15, 0, r0, c7, c14\n\t"
+		"mcr p15, 0, r0, c7, c5\n\t"
+		"mcr p15, 0, r0, c7, c10, 4\n\t" ::: "r0", "cc", "memory"
+	);
+		"mcr p15, 0, r0, c7, c10, 4\n\t"
+		"mov r0, #0xd3\n\t"
+		"msr cpsr_c, r0" ::: "r0", "cc", "memory"
+	);
+*/
 
 	uint32_t ttbr0;
         asm("mrc p15, 0, %0, c2, c0, 0" :"=r"(ttbr0));
@@ -140,19 +143,27 @@ static uint32_t oib_call_change() {
 		| MMU_AP_BOTHWRITE			// set AP to 11 (APX is always 0, so this means R/W for everyone)
 		| MMU_SECTION;				// this is a section
 
+/*
+	uint32_t miu;
+	poke_mem((uint32_t*)0xBFC00000, (uint32_t)&miu, 4, false, true);
+	miu &= ~3;
+	miu |= 2;
+	poke_mem((uint32_t*)0xBFC00000, (uint32_t)&miu, 4, true, true);
+*/
+
 	poke_mem(&((uint32_t*)ttbr0)[section >> 20], (uint32_t)&sectionEntry, 4, true, true);
 
 	asm volatile(
 		"mov r0, #0\n\t"
-		"mcr p15, 0, r0, c8, c7\n\t"
+		"mcr p15, 0, r0, c8, c7" ::: "r0", "cc", "memory"
 	);
 
 //	poke_mem((void*)0x5F700000, (uint32_t)iphone_4_openiboot_bin, oibSize, 1, 1);
 
 	memcpy((uint32_t*)section, iphone_4_openiboot_bin, oibSize);
-	while(1);
 
-	((void (*)()) oibAddr)();
+	((void (*)()) (((uint32_t)oibAddr)+1))();
+	while(1);
 
 //	((void (*)()) ((uint32_t)iphone_4_openiboot_bin))();
 //	((void (*)()) (((uint32_t)iphone_4_openiboot_bin)+1))();
